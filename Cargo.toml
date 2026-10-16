@@ -1,0 +1,44 @@
+cargo-features = ["different-binary-name"]
+
+[package]
+name = "moon"
+version = "0.1.0"
+edition = "2024"
+autobins = false
+autoexamples = false
+autotests = false
+autobenches = false
+
+[[bin]]
+name = "moon"
+filename = "moon.fap"
+bench = false
+test = false
+
+[dependencies]
+flipperzero = {
+    git = "https://github.com/loftyinclination/flipperzero",
+    branch = "bluetooth-profiles",
+    features = ["alloc", "chrono"]
+}
+flipperzero-rt = {
+    git = "https://github.com/loftyinclination/flipperzero",
+    branch = "bluetooth-profiles"
+}
+flipperzero-alloc = {
+    git = "https://github.com/loftyinclination/flipperzero",
+    branch = "bluetooth-profiles"
+}
+flipperzero-sys = {
+    git = "https://github.com/loftyinclination/flipperzero",
+    branch = "bluetooth-profiles"
+}
+siderust = {
+    git = "https://github.com/Siderust/siderust",
+    default-features = false,
+}
+ufmt = "0.2.0"
+
+[patch.'https://github.com/loftyinclination/flipperzero']
+flipperzero = { path = "../flipper-zero-api/crates/flipperzero/" }
+flipperzero-sys = { path = "../flipper-zero-api/crates/sys/" }
