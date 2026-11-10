@@ -1,133 +1,38 @@
-#![no_main]
 #![no_std]
+#![no_main]
 
-// Required for panic handler
 extern crate alloc;
-extern crate flipperzero_alloc;
-extern crate flipperzero_rt;
+extern crate libc;
 
-use core::ffi::CStr;
-
-use alloc::sync::Arc;
-use flipperzero::furi::sync::Mutex;
-use flipperzero::furi::thread::{Timer, sleep};
-use flipperzero::gui::Gui;
-use flipperzero::gui::view_port::{ViewPort, ViewPortCallbacks};
-use flipperzero::info;
-use flipperzero_rt::{entry, manifest};
-use flipperzero_sys::furi::UnsafeRecord;
-
-use core::f64;
-use core::ops::AddAssign;
-use core::time::Duration;
-use flipperzero::furi::time::FuriDuration;
+use core::alloc::GlobalAlloc;
 use siderust::affn::frames::{EquatorialTrueOfDate, Horizontal};
+use siderust::astro::eop::NullEop;
 use siderust::astro::nutation::Iau2006;
 use siderust::bodies::Moon;
-use siderust::chrono::{self, DateTime, Utc};
+use siderust::chrono::{self, DateTime, TimeZone, Utc};
 use siderust::coordinates::centers::{Geodetic, Topocentric};
+use siderust::coordinates::transform::context::DefaultEphemeris;
 use siderust::event::horizontal::equatorial_to_horizontal_true_of_date_with_ctx;
 use siderust::event::lunar::phase::moon_phase;
 use siderust::qtty::{
-    AstronomicalUnit, DEG, Degree, IlluminationFraction, Kilometer, M, Quantity, Radian, Turn,
+    AstronomicalUnit, DEG, Degree, IlluminationFraction, Kilometer, M, Quantity, Radian,
 };
-use ufmt::{uDisplay, uwrite};
 
-// Define the FAP Manifest for this application
-manifest!(
-    name = "Moon",
-    app_version = 1,
-    has_icon = true,
-    // See https://github.com/flipperzero-rs/flipperzero/blob/v0.11.0/docs/icons.md for icon format
-    icon = "rustacean-10x10.icon",
-);
-
-// Define the entry function
-entry!(main);
-
-const HEIGHT: i32 = 8;
-
-struct Context {
-    channel: Arc<Mutex<State>>,
+struct MoonUp {
+    illuminated_fraction: Quantity<IlluminationFraction>,
+    bright_limb_position_angle: Quantity<Radian>,
+    azimuth: Quantity<Degree>,
 }
 
-enum State {
-    MoonUp {
-        illuminated_fraction: Quantity<IlluminationFraction>,
-        // Measured North through East, the point of greatest illumination
-        bright_limb_position_angle: Quantity<Radian>,
-    },
-}
-
-impl Default for State {
-    fn default() -> Self {
-        State::MoonUp {
-            illuminated_fraction: Quantity::one(),
-            bright_limb_position_angle: Quantity::zero(),
-        }
-    }
-}
-
-struct RightAscension(Quantity<Degree>);
-
-impl uDisplay for RightAscension {
-    fn fmt<W>(&self, f: &mut ufmt::Formatter<'_, W>) -> Result<(), W::Error>
-    where
-        W: ufmt::uWrite + ?Sized,
-    {
-        let this = self.0.to::<Turn>().value();
-        let hours = this * 24.0;
-        let minutes = (hours * 60.0) % 24.0;
-        let seconds = (minutes * 60.0) % 60.0;
-        let hours = unsafe { f64::to_int_unchecked::<u8>(hours) };
-        let minutes = unsafe { f64::to_int_unchecked::<u8>(minutes) };
-        let seconds = unsafe { f64::to_int_unchecked::<u8>(seconds) };
-
-        uwrite!(f, "{}h{}m{}s", hours, minutes, seconds)
-    }
-}
-
-struct Degrees(Quantity<Degree>);
-
-impl uDisplay for Degrees {
-    fn fmt<W>(&self, f: &mut ufmt::Formatter<'_, W>) -> Result<(), W::Error>
-    where
-        W: ufmt::uWrite + ?Sized,
-    {
-        let degrees = self.0.value();
-        let arcminutes = degrees % 60.0;
-        let arcseconds = arcminutes % 60.0;
-        let degrees = unsafe { f64::to_int_unchecked::<u8>(degrees) };
-        let arcminutes = unsafe { f64::to_int_unchecked::<u8>(arcminutes) };
-        let arcseconds = unsafe { f64::to_int_unchecked::<u8>(arcseconds) };
-
-        uwrite!(f, "{}°{}′{}″", degrees, arcminutes, arcseconds)
-    }
-}
-
-impl State {
-    fn get_now() -> Self {
-        let time = flipperzero::furi::hal::rtc::datetime();
-
-        info!(
-            "Getting current sun and moon position at {:?} in Bath",
-            time
-        );
-
-        let time: DateTime<Utc> = time.into();
-
-        Self::get_at_time(time)
-    }
-
+impl MoonUp {
     fn get_at_time(time: DateTime<Utc>) -> Self {
-        // TODO: get location from config?
-        let bath = Geodetic::new(51.373983 * DEG, -2.392440 * DEG, 72.0 * M);
+        let site = Geodetic::new(51.507222 * DEG, -0.1275 * DEG, M);
 
         let time: siderust::time::Time<siderust::time::TT, siderust::JD> = time.into();
         use siderust::affn::SphericalPosition;
         use siderust::coordinates::transform::AstroContext;
 
-        let ctx = AstroContext::new();
+        let ctx: AstroContext<DefaultEphemeris, NullEop> = AstroContext::with_types();
         let ctx = ctx.with_model::<Iau2006>();
 
         let moon_topocentric_equatorial_coordinates: SphericalPosition<
@@ -142,7 +47,7 @@ impl State {
 
             siderust::event::horizontal::geocentric_j2000_to_apparent_topocentric_with_ctx(
                 &moon_geo_eq_j2000,
-                bath,
+                site,
                 time,
                 &ctx,
             )
@@ -151,18 +56,10 @@ impl State {
         let moon_alt_azimuth_coordinates: SphericalPosition<Topocentric, Horizontal, Kilometer> =
             equatorial_to_horizontal_true_of_date_with_ctx(
                 &moon_topocentric_equatorial_coordinates,
-                bath,
+                site,
                 time,
                 &ctx,
             );
-
-        info!(
-            "Moon position: Ra/Dec={}/{}, Az/Alt={}/{}",
-            RightAscension(moon_topocentric_equatorial_coordinates.ra()),
-            Degrees(moon_topocentric_equatorial_coordinates.dec()),
-            Degrees(moon_alt_azimuth_coordinates.az()),
-            Degrees(moon_alt_azimuth_coordinates.alt())
-        );
 
         let sun_topo = {
             use siderust::coordinates::cartesian::position::{
@@ -181,7 +78,7 @@ impl State {
 
             siderust::event::horizontal::geocentric_j2000_to_apparent_topocentric_with_ctx(
                 &geo_cart_j2000,
-                bath,
+                site,
                 time,
                 &ctx,
             )
@@ -197,100 +94,62 @@ impl State {
             .position_angle_to(&sun_topo.direction())
             .unwrap_or(Quantity::zero());
 
-        Self::MoonUp {
+        MoonUp {
             illuminated_fraction,
             bright_limb_position_angle: position_angle,
+            azimuth: moon_alt_azimuth_coordinates.alt(),
         }
     }
 }
 
-struct MoonClockRunner {
-    timer: Timer,
+#[panic_handler]
+fn panic_handler(_info: &core::panic::PanicInfo) -> ! {
+    loop {}
 }
 
-impl Default for MoonClockRunner {
-    fn default() -> Self {
-        let gui = Gui::open();
-        let channel: Arc<Mutex<State>> = Default::default();
-        let view_port = ViewPort::new(Context {
-            channel: channel.clone(),
-        });
-        let view_port = gui.add_view_port(view_port, flipperzero::gui::GuiLayer::Fullscreen);
-        //let view_port = gui.add_view_port(view_port, flipperzero::gui::GuiLayer::StatusBarRight);
+#[unsafe(no_mangle)]
+pub extern "C" fn main(_argc: isize, _argv: *const *const u8) -> isize {
+    let now = chrono::Utc
+        .with_ymd_and_hms(2026, 11, 10, 20, 10, 0)
+        .unwrap();
 
-        let time: Arc<Mutex<DateTime<Utc>>> =
-            Arc::new(Mutex::new(flipperzero::furi::hal::rtc::datetime().into()));
+    let moon_up = MoonUp::get_at_time(now);
+    unsafe {
+        libc::printf(
+            c"Moon is %s the horizon (%.2f°), angle of %.2f° and %.1f%% illuminated\n".as_ptr(),
+            if moon_up.azimuth.value_ref().is_sign_positive() {
+                c"above"
+            } else {
+                c"below"
+            },
+            moon_up.azimuth.value(),
+            moon_up
+                .bright_limb_position_angle
+                .to_const::<Degree>()
+                .value(),
+            moon_up.illuminated_fraction.value() * 100.0,
+        )
+    };
 
-        let timer_channel = channel.clone();
-        let timer = Timer::new(move || {
-            let mut time = time.lock();
-            *timer_channel.lock() = State::get_at_time(*time);
-            view_port.update();
-            (*time).add_assign(chrono::TimeDelta::hours(6));
-        });
-        Self { timer }
-    }
-}
-
-fn main(_args: Option<&CStr>) -> i32 {
-    //let record: UnsafeRecord<MoonClockRunner> = unsafe { UnsafeRecord::get_or_default(c"moon") };
-    let mut clock = MoonClockRunner::default();
-    clock
-        .timer
-        .start(FuriDuration::from_millis(200))
-        .expect("Failed to start timer");
-
-    sleep(Duration::from_secs(10));
-
-    clock.timer.stop().expect("Failed to stop timer");
     0
 }
 
-impl ViewPortCallbacks for Context {
-    fn on_draw(&mut self, mut canvas: flipperzero::gui::canvas::CanvasView<'_>) {
-        let diameter = core::cmp::min(canvas.height(), canvas.width()).get();
-        let radius = diameter / 2;
-        let center = (diameter / 2) as i32;
+pub struct LibcAlloc;
 
-        match *self.channel.lock() {
-            State::MoonUp {
-                illuminated_fraction,
-                bright_limb_position_angle,
-            } => {
-                use embedded_graphics::geometry::{Angle, Point};
-                use embedded_graphics::pixelcolor::BinaryColor;
-                use embedded_graphics::primitives::{
-                    Ellipse, PrimitiveStyle, Sector, StyledDrawable,
-                };
+#[global_allocator]
+static ALLOCATOR: LibcAlloc = LibcAlloc;
 
-                // Pacman with a pointy mouth
-                Sector::new(
-                    Point::zero(),
-                    diameter as u32,
-                    Angle::from_degrees(
-                        (bright_limb_position_angle - Quantity::QUARTER_TURN)
-                            .normalize()
-                            .value() as _,
-                    ),
-                    Angle::from_degrees(180.0),
-                )
-                .draw_styled(&PrimitiveStyle::with_fill(BinaryColor::On), &mut canvas);
+unsafe impl GlobalAlloc for LibcAlloc {
+    #[inline]
+    unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {
+        let align = layout.align().max(core::mem::size_of::<usize>());
+        let size = layout.size();
 
-                Ellipse::new_with_center_and_rotation(
-                    Point::new_equal(center),
-                    radius as _,
-                    ((radius as f64) * illuminated_fraction.value()) as _,
-                    Angle::from_degrees(bright_limb_position_angle.value() as _),
-                )
-                .draw_styled(
-                    &PrimitiveStyle::with_fill(if illuminated_fraction.value() > 0.5 {
-                        BinaryColor::On
-                    } else {
-                        BinaryColor::Off
-                    }),
-                    &mut canvas,
-                );
-            }
-        }
+        (unsafe { libc::memalign(align, size) }) as *mut u8
+    }
+
+    #[inline]
+    unsafe fn dealloc(&self, ptr: *mut u8, _layout: core::alloc::Layout) {
+        unsafe { libc::free(ptr as *mut core::ffi::c_void) };
     }
 }
