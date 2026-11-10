@@ -10,7 +10,7 @@ use core::ffi::CStr;
 
 use alloc::sync::Arc;
 use flipperzero::furi::sync::Mutex;
-use flipperzero::furi::thread::Timer;
+use flipperzero::furi::thread::{Timer, sleep};
 use flipperzero::gui::Gui;
 use flipperzero::gui::view_port::{ViewPort, ViewPortCallbacks};
 use flipperzero::info;
@@ -18,19 +18,19 @@ use flipperzero_rt::{entry, manifest};
 use flipperzero_sys::furi::UnsafeRecord;
 
 use core::f64;
-use siderust::affn::frames::{EclipticTrueOfDate, EquatorialTrueOfDate, Horizontal};
-use siderust::affn::transform::Transform;
-use siderust::affn::{Rotation3, SphericalPosition};
-use siderust::bodies::{Moon, Sun};
-use siderust::chrono::{DateTime, Utc};
+use core::ops::AddAssign;
+use core::time::Duration;
+use flipperzero::furi::time::FuriDuration;
+use siderust::affn::frames::{EquatorialTrueOfDate, Horizontal};
+use siderust::astro::nutation::Iau2006;
+use siderust::bodies::Moon;
+use siderust::chrono::{self, DateTime, Utc};
 use siderust::coordinates::centers::{Geodetic, Topocentric};
-use siderust::ephemeris::Vsop87Ephemeris;
-use siderust::event::horizontal::equatorial_to_horizontal;
-use siderust::event::lunar::phase::moon_phase_topocentric;
-use siderust::qtty::{AstronomicalUnit, DAY, DEG, M, Quantity, Turn};
-use siderust::time::Interval;
-use siderust::{AltitudeEventsExt, AltitudeProvider};
-use siderust::{SearchOpts, twilight_classification};
+use siderust::event::horizontal::equatorial_to_horizontal_true_of_date_with_ctx;
+use siderust::event::lunar::phase::moon_phase;
+use siderust::qtty::{
+    AstronomicalUnit, DEG, Degree, IlluminationFraction, Kilometer, M, Quantity, Radian, Turn,
+};
 use ufmt::{uDisplay, uwrite};
 
 // Define the FAP Manifest for this application
@@ -45,19 +45,30 @@ manifest!(
 // Define the entry function
 entry!(main);
 
+const HEIGHT: i32 = 8;
+
 struct Context {
     channel: Arc<Mutex<State>>,
 }
 
 enum State {
-    SunsetSoon,
-    SunriseSoon,
-    MoonriseSoon,
-    MoonUp,
-    MoonsetSoon,
+    MoonUp {
+        illuminated_fraction: Quantity<IlluminationFraction>,
+        // Measured North through East, the point of greatest illumination
+        bright_limb_position_angle: Quantity<Radian>,
+    },
 }
 
-struct RightAscension(Quantity<siderust::qtty::Degree>);
+impl Default for State {
+    fn default() -> Self {
+        State::MoonUp {
+            illuminated_fraction: Quantity::one(),
+            bright_limb_position_angle: Quantity::zero(),
+        }
+    }
+}
+
+struct RightAscension(Quantity<Degree>);
 
 impl uDisplay for RightAscension {
     fn fmt<W>(&self, f: &mut ufmt::Formatter<'_, W>) -> Result<(), W::Error>
@@ -76,7 +87,7 @@ impl uDisplay for RightAscension {
     }
 }
 
-struct Degrees(Quantity<siderust::qtty::Degree>);
+struct Degrees(Quantity<Degree>);
 
 impl uDisplay for Degrees {
     fn fmt<W>(&self, f: &mut ufmt::Formatter<'_, W>) -> Result<(), W::Error>
@@ -96,103 +107,99 @@ impl uDisplay for Degrees {
 
 impl State {
     fn get_now() -> Self {
+        let time = flipperzero::furi::hal::rtc::datetime();
+
+        info!(
+            "Getting current sun and moon position at {:?} in Bath",
+            time
+        );
+
+        let time: DateTime<Utc> = time.into();
+
+        Self::get_at_time(time)
+    }
+
+    fn get_at_time(time: DateTime<Utc>) -> Self {
         // TODO: get location from config?
         let bath = Geodetic::new(51.373983 * DEG, -2.392440 * DEG, 72.0 * M);
 
-        let now = flipperzero::furi::hal::rtc::datetime();
-        info!("Getting current sun and moon position at {:?} in Bath", now);
+        let time: siderust::time::Time<siderust::time::TT, siderust::JD> = time.into();
+        use siderust::affn::SphericalPosition;
+        use siderust::coordinates::transform::AstroContext;
 
-        let now: DateTime<Utc> = now.into();
-
-        let start: siderust::time::Time<siderust::time::TT, siderust::MJD> = now.into();
+        let ctx = AstroContext::new();
+        let ctx = ctx.with_model::<Iau2006>();
 
         let moon_topocentric_equatorial_coordinates: SphericalPosition<
             Topocentric,
             EquatorialTrueOfDate,
-            AstronomicalUnit,
-        > = Moon::get_apparent_topocentric_equ(start.to::<siderust::time::JD>(), bath);
+            Kilometer,
+        > = {
+            use siderust::coordinates::transform::TransformFrame;
 
-        let moon_alt_azimuth_coordinates: SphericalPosition<
-            Topocentric,
-            Horizontal,
-            AstronomicalUnit,
-        > = equatorial_to_horizontal(
-            &moon_topocentric_equatorial_coordinates,
-            bath,
-            start.to::<siderust::time::JD>(),
-        );
+            let moon_geo_ecliptic = Moon::get_geo_position::<Kilometer>(time);
+            let moon_geo_eq_j2000 = TransformFrame::to_frame(&moon_geo_ecliptic);
 
-        let transform = Transform::<
-            Topocentric,
-            EquatorialTrueOfDate,
-            Topocentric,
-            EclipticTrueOfDate,
-            Rotation3,
-        >::new(Rotation3::IDENTITY);
+            siderust::event::horizontal::geocentric_j2000_to_apparent_topocentric_with_ctx(
+                &moon_geo_eq_j2000,
+                bath,
+                time,
+                &ctx,
+            )
+        };
 
-        let moon_ecliptical_coordinates: SphericalPosition<_, EclipticTrueOfDate, _> = transform
-            .apply(moon_topocentric_equatorial_coordinates.to_cartesian())
-            .to_spherical();
+        let moon_alt_azimuth_coordinates: SphericalPosition<Topocentric, Horizontal, Kilometer> =
+            equatorial_to_horizontal_true_of_date_with_ctx(
+                &moon_topocentric_equatorial_coordinates,
+                bath,
+                time,
+                &ctx,
+            );
 
         info!(
-            "Moon position: Ra/Dec={}/{}, Az/Alt={}/{}, Ecliptic Lat/Long={}/{}",
+            "Moon position: Ra/Dec={}/{}, Az/Alt={}/{}",
             RightAscension(moon_topocentric_equatorial_coordinates.ra()),
             Degrees(moon_topocentric_equatorial_coordinates.dec()),
             Degrees(moon_alt_azimuth_coordinates.az()),
-            Degrees(moon_alt_azimuth_coordinates.alt()),
-            Degrees(moon_ecliptical_coordinates.lat()),
-            Degrees(moon_ecliptical_coordinates.lon())
+            Degrees(moon_alt_azimuth_coordinates.alt())
         );
 
-        let sun_topocentric_equatorial_coordinates: SphericalPosition<
-            Topocentric,
-            EquatorialTrueOfDate,
-            AstronomicalUnit,
-        > = Sun::get_apparent_topocentric_equ(start.to::<siderust::time::JD>(), bath);
+        let sun_topo = {
+            use siderust::coordinates::cartesian::position::{
+                EclipticMeanJ2000, EquatorialMeanJ2000,
+            };
+            use siderust::coordinates::centers::{Geocentric, Heliocentric};
+            use siderust::coordinates::transform::PositionAstroExt as _;
 
-        let sun_alt_azimuth_coordinates = equatorial_to_horizontal(&sun_topocentric_equatorial_coordinates, bath, start.to::<siderust::time::JD>())
+            let helio = EclipticMeanJ2000::<AstronomicalUnit, Heliocentric>::CENTER;
 
-        let sun_ecliptical_coordinates = transform
-            .apply(sun_topocentric_equatorial_coordinates.to_cartesian())
-            .to_spherical();
+            let geo_ecl_j2000: EclipticMeanJ2000<AstronomicalUnit, Geocentric> =
+                helio.to_with(&time, &ctx);
 
-        info!(
-            "Sun position: Ra/Dec={}/{}, Az/Alt={}/{}, Ecliptic Lat/Long={}/{}",
-            RightAscension(sun_topocentric_equatorial_coordinates.ra()),
-            Degrees(sun_topocentric_equatorial_coordinates.dec()),
-            Degrees(sun_alt_azimuth_coordinates.az()),
-            Degrees(sun_alt_azimuth_coordinates.alt()),
-            Degrees(sun_ecliptical_coordinates.lat()),
-            Degrees(sun_ecliptical_coordinates.lon())
-        );
+            let geo_cart_j2000: EquatorialMeanJ2000<AstronomicalUnit, Geocentric> =
+                geo_ecl_j2000.to_frame_with(&time, &ctx);
 
-        let twilight_classification = twilight_classification(sun_alt_azimuth_coordinates.alt());
+            siderust::event::horizontal::geocentric_j2000_to_apparent_topocentric_with_ctx(
+                &geo_cart_j2000,
+                bath,
+                time,
+                &ctx,
+            )
+        };
 
-        let moon_phase = moon_phase_topocentric::<Vsop87Ephemeris>(now.into(), bath);
+        let siderust::MoonPhaseGeometry {
+            illuminated_fraction,
+            ..
+        } = { moon_phase(moon_topocentric_equatorial_coordinates, sun_topo) };
 
-        if moon_alt_azimuth_coordinates.alt() > 0.0 * DEG {
-            // Moon is currently up
+        let position_angle = moon_topocentric_equatorial_coordinates
+            .direction()
+            .position_angle_to(&sun_topo.direction())
+            .unwrap_or(Quantity::zero());
 
-            todo!()
-        } else {
-            let moonrise = Moon
-                .above_threshold(
-                    &bath,
-                    Interval {
-                        start,
-                        end: start + 1.0 * DAY,
-                    },
-                    0.0 * DEG,
-                    SearchOpts::default(),
-                )
-                .remove(0);
-
-            let moonrise_time = moonrise
-                .start
-                .try_to_chrono()
-                .expect("Should be able to convert time");
-            // Moon will rise at some point
-            todo!()
+        Self::MoonUp {
+            illuminated_fraction,
+            bright_limb_position_angle: position_angle,
         }
     }
 }
@@ -204,34 +211,86 @@ struct MoonClockRunner {
 impl Default for MoonClockRunner {
     fn default() -> Self {
         let gui = Gui::open();
-        let channel = Arc::new(Mutex::new(State::SunsetSoon));
+        let channel: Arc<Mutex<State>> = Default::default();
         let view_port = ViewPort::new(Context {
             channel: channel.clone(),
         });
-        let view_port = gui.add_view_port(view_port, flipperzero::gui::GuiLayer::StatusBarRight);
+        let view_port = gui.add_view_port(view_port, flipperzero::gui::GuiLayer::Fullscreen);
+        //let view_port = gui.add_view_port(view_port, flipperzero::gui::GuiLayer::StatusBarRight);
 
+        let time: Arc<Mutex<DateTime<Utc>>> =
+            Arc::new(Mutex::new(flipperzero::furi::hal::rtc::datetime().into()));
+
+        let timer_channel = channel.clone();
         let timer = Timer::new(move || {
-            let channel = channel.clone();
-            *channel.lock() = State::get_now();
+            let mut time = time.lock();
+            *timer_channel.lock() = State::get_at_time(*time);
             view_port.update();
+            (*time).add_assign(chrono::TimeDelta::hours(6));
         });
         Self { timer }
     }
 }
 
 fn main(_args: Option<&CStr>) -> i32 {
-    let record: UnsafeRecord<MoonClockRunner> = unsafe { UnsafeRecord::get_or_default(c"moon") };
+    //let record: UnsafeRecord<MoonClockRunner> = unsafe { UnsafeRecord::get_or_default(c"moon") };
+    let mut clock = MoonClockRunner::default();
+    clock
+        .timer
+        .start(FuriDuration::from_millis(200))
+        .expect("Failed to start timer");
+
+    sleep(Duration::from_secs(10));
+
+    clock.timer.stop().expect("Failed to stop timer");
     0
 }
 
 impl ViewPortCallbacks for Context {
-    fn on_draw(&mut self, canvas: flipperzero::gui::canvas::CanvasView<'_>) {
+    fn on_draw(&mut self, mut canvas: flipperzero::gui::canvas::CanvasView<'_>) {
+        let diameter = core::cmp::min(canvas.height(), canvas.width()).get();
+        let radius = diameter / 2;
+        let center = (diameter / 2) as i32;
+
         match *self.channel.lock() {
-            State::SunsetSoon => todo!(),
-            State::SunriseSoon => todo!(),
-            State::MoonriseSoon => todo!(),
-            State::MoonUp => todo!(),
-            State::MoonsetSoon => todo!(),
+            State::MoonUp {
+                illuminated_fraction,
+                bright_limb_position_angle,
+            } => {
+                use embedded_graphics::geometry::{Angle, Point};
+                use embedded_graphics::pixelcolor::BinaryColor;
+                use embedded_graphics::primitives::{
+                    Ellipse, PrimitiveStyle, Sector, StyledDrawable,
+                };
+
+                // Pacman with a pointy mouth
+                Sector::new(
+                    Point::zero(),
+                    diameter as u32,
+                    Angle::from_degrees(
+                        (bright_limb_position_angle - Quantity::QUARTER_TURN)
+                            .normalize()
+                            .value() as _,
+                    ),
+                    Angle::from_degrees(180.0),
+                )
+                .draw_styled(&PrimitiveStyle::with_fill(BinaryColor::On), &mut canvas);
+
+                Ellipse::new_with_center_and_rotation(
+                    Point::new_equal(center),
+                    radius as _,
+                    ((radius as f64) * illuminated_fraction.value()) as _,
+                    Angle::from_degrees(bright_limb_position_angle.value() as _),
+                )
+                .draw_styled(
+                    &PrimitiveStyle::with_fill(if illuminated_fraction.value() > 0.5 {
+                        BinaryColor::On
+                    } else {
+                        BinaryColor::Off
+                    }),
+                    &mut canvas,
+                );
+            }
         }
     }
 }

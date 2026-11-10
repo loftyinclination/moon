@@ -19,7 +19,7 @@ test = false
 flipperzero = {
     git = "https://github.com/loftyinclination/flipperzero",
     branch = "bluetooth-profiles",
-    features = ["alloc", "chrono"]
+    features = ["alloc", "chrono", "embedded-graphics"]
 }
 flipperzero-rt = {
     git = "https://github.com/loftyinclination/flipperzero",
@@ -33,11 +33,10 @@ flipperzero-sys = {
     git = "https://github.com/loftyinclination/flipperzero",
     branch = "bluetooth-profiles"
 }
-siderust = {
-    git = "https://github.com/Siderust/siderust",
-    default-features = false,
-}
+siderust = { version = "0.18.1", default-features = false }
 ufmt = "0.2.0"
+embedded-graphics = "0.8.2"
+embedded-graphics-core = "0.4.1"
 
 [patch.'https://github.com/loftyinclination/flipperzero']
 flipperzero = { path = "../flipper-zero-api/crates/flipperzero/" }
