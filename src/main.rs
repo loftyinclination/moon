@@ -5,18 +5,12 @@ extern crate alloc;
 extern crate libc;
 
 use core::alloc::GlobalAlloc;
-use siderust::affn::frames::{EquatorialTrueOfDate, Horizontal};
-use siderust::astro::eop::NullEop;
-use siderust::astro::nutation::Iau2006;
 use siderust::bodies::Moon;
 use siderust::chrono::{self, DateTime, TimeZone, Utc};
 use siderust::coordinates::centers::{Geodetic, Topocentric};
-use siderust::coordinates::transform::context::DefaultEphemeris;
-use siderust::event::horizontal::equatorial_to_horizontal_true_of_date_with_ctx;
-use siderust::event::lunar::phase::moon_phase;
-use siderust::qtty::{
-    AstronomicalUnit, DEG, Degree, IlluminationFraction, Kilometer, M, Quantity, Radian,
-};
+use siderust::ephemeris::Vsop87Ephemeris;
+use siderust::moon_phase_topocentric;
+use siderust::qtty::{DEG, Degree, IlluminationFraction, Kilometer, M, Quantity, Radian};
 
 struct MoonUp {
     illuminated_fraction: Quantity<IlluminationFraction>,
@@ -29,69 +23,15 @@ impl MoonUp {
         let site = Geodetic::new(51.507222 * DEG, -0.1275 * DEG, M);
 
         let time: siderust::time::Time<siderust::time::TT, siderust::JD> = time.into();
-        use siderust::affn::SphericalPosition;
-        use siderust::coordinates::transform::AstroContext;
 
-        let ctx: AstroContext<DefaultEphemeris, NullEop> = AstroContext::with_types();
-        let ctx = ctx.with_model::<Iau2006>();
-
-        let moon_topocentric_equatorial_coordinates: SphericalPosition<
-            Topocentric,
-            EquatorialTrueOfDate,
-            Kilometer,
-        > = {
-            use siderust::coordinates::transform::TransformFrame;
-
-            let moon_geo_ecliptic = Moon::get_geo_position::<Kilometer>(time);
-            let moon_geo_eq_j2000 = TransformFrame::to_frame(&moon_geo_ecliptic);
-
-            siderust::event::horizontal::geocentric_j2000_to_apparent_topocentric_with_ctx(
-                &moon_geo_eq_j2000,
-                site,
-                time,
-                &ctx,
-            )
-        };
-
-        let moon_alt_azimuth_coordinates: SphericalPosition<Topocentric, Horizontal, Kilometer> =
-            equatorial_to_horizontal_true_of_date_with_ctx(
-                &moon_topocentric_equatorial_coordinates,
-                site,
-                time,
-                &ctx,
-            );
-
-        let sun_topo = {
-            use siderust::coordinates::cartesian::position::{
-                EclipticMeanJ2000, EquatorialMeanJ2000,
-            };
-            use siderust::coordinates::centers::{Geocentric, Heliocentric};
-            use siderust::coordinates::transform::PositionAstroExt as _;
-
-            let helio = EclipticMeanJ2000::<AstronomicalUnit, Heliocentric>::CENTER;
-
-            let geo_ecl_j2000: EclipticMeanJ2000<AstronomicalUnit, Geocentric> =
-                helio.to_with(&time, &ctx);
-
-            let geo_cart_j2000: EquatorialMeanJ2000<AstronomicalUnit, Geocentric> =
-                geo_ecl_j2000.to_frame_with(&time, &ctx);
-
-            siderust::event::horizontal::geocentric_j2000_to_apparent_topocentric_with_ctx(
-                &geo_cart_j2000,
-                site,
-                time,
-                &ctx,
-            )
-        };
+        let moon_alt_azimuth_coordinates = Moon::get_horizontal::<Kilometer>(time, site);
 
         let siderust::MoonPhaseGeometry {
             illuminated_fraction,
             ..
-        } = { moon_phase(moon_topocentric_equatorial_coordinates, sun_topo) };
+        } = moon_phase_topocentric::<Vsop87Ephemeris>(time, site);
 
-        let position_angle = moon_topocentric_equatorial_coordinates
-            .direction()
-            .position_angle_to(&sun_topo.direction())
+        let position_angle = Moon::bright_limb_position_angle::<Topocentric>((time, site))
             .unwrap_or(Quantity::zero());
 
         MoonUp {
