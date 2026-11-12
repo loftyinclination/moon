@@ -16,9 +16,6 @@ test = false
 siderust = { version = "0.18.1", default-features = false }
 libc = { version = "0.2", default-features = false }
 
-[patch.crates-io]
-siderust = { git = "https://github.com/loftyinclination/siderust", branch = "binary-size" }
-
 [profile.dev]
 strip = true
 opt-level = "z"
