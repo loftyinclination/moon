@@ -8,7 +8,7 @@ use core::alloc::GlobalAlloc;
 use siderust::bodies::Moon;
 use siderust::chrono::{self, DateTime, TimeZone, Utc};
 use siderust::coordinates::centers::{Geodetic, Topocentric};
-use siderust::ephemeris::Vsop87Ephemeris;
+use siderust::ephemeris::CompactEphemeris;
 use siderust::moon_phase_topocentric;
 use siderust::qtty::{DEG, Degree, IlluminationFraction, Kilometer, M, Quantity, Radian};
 
@@ -29,7 +29,7 @@ impl MoonUp {
         let siderust::MoonPhaseGeometry {
             illuminated_fraction,
             ..
-        } = moon_phase_topocentric::<Vsop87Ephemeris>(time, site);
+        } = moon_phase_topocentric::<CompactEphemeris>(time, site);
 
         let position_angle = Moon::bright_limb_position_angle::<Topocentric>((time, site))
             .unwrap_or(Quantity::zero());
